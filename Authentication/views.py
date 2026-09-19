@@ -203,7 +203,7 @@ class UserRoleRequestListCreateView(generics.ListCreateAPIView):
         )
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        serializer.save()
 
 
 class UserRoleRequestDetailView(generics.RetrieveAPIView):

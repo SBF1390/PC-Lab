@@ -53,7 +53,7 @@ class UserBase(AbstractBaseUser, PermissionsMixin):
 
     UserName = models.CharField(max_length=85, unique=True)
     FName = models.CharField(max_length=75)
-    Email = models.EmailField(max_length=150, blank=True)
+    Email = models.EmailField(max_length=150, unique=True)
     
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
