@@ -16,3 +16,7 @@ Thumbs.db
 .coverage
 .tox/
 .eggs/
+
+# Others
+
+GoogleClientInformation.json

@@ -5,9 +5,12 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
 load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.environ["SECRET_KEY"]
+
+BASE_URL = os.environ["BASE_URL"]
 
 DEBUG = True
 
@@ -71,23 +74,16 @@ DATABASES = {
 
 
 # Password validation
-# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
+# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
-    },
-    {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
-    },
-    {
-        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
-    },
-    {
-        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
+        "OPTIONS": {
+            "min_length": 8,
+        },
     },
 ]
-
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
@@ -126,3 +122,5 @@ EMAIL_HOST_USER = os.environ["EMAIL_HOST_USER"]
 EMAIL_HOST_PASSWORD = os.environ["EMAIL_HOST_PASSWORD"]
 
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")

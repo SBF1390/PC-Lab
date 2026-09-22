@@ -3,18 +3,24 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.db import transaction
+from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from google.auth.transport import requests
+from google.oauth2 import id_token
 from rest_framework import generics, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import RoleRequest
-from .serializers import *
+from .models import RoleRequest, UserBase, UserRole
+from .permissions import RolePermissionMixin
+from .serializers import (AdminRoleRequestSerializer, RoleRequestSerializer,
+                          UserBaseSerializer, UserTokenObtainSerializer)
 
 UserBase = get_user_model()
 
@@ -52,9 +58,7 @@ class SignUpView(generics.CreateAPIView):
 
         uid = urlsafe_base64_encode(force_bytes(user.pk))
 
-        current_site = request.get_host()
-
-        activation_link = f"http://{current_site}" f"/account/activate/{uid}/{token}/"
+        activation_link = f"{settings.BASE_URL}" f"/account/activate/{uid}/{token}/"
 
         send_mail(
             subject="Activate your PC-Lab account",
@@ -258,7 +262,9 @@ class UserRoleRequestCancelView(generics.GenericAPIView):
             )
 
         role_request.status = RoleRequest.Status.CANCELLED
-        role_request.save(update_fields=["status"])
+        role_request.reviewed_at = timezone.now()
+
+        role_request.save(update_fields=["status", "reviewed_at"])
 
         return Response(
             {"detail": "Role request cancelled successfully."},
@@ -266,7 +272,56 @@ class UserRoleRequestCancelView(generics.GenericAPIView):
         )
 
 
-class AdminRoleRequestListView(generics.ListAPIView):
+class UserRoleRemoveView(generics.GenericAPIView):
+    """
+    Remove a removable role from the authenticated user.
+
+    Users can remove:
+        - Teacher
+        - Author
+
+    Member and Admin roles cannot be removed.
+    """
+
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [JWTAuthentication]
+
+    REMOVABLE_ROLES = {
+        "teacher": "Teacher",
+        "author": "Author",
+    }
+
+    def delete(self, request, role_name):
+
+        role_name = self.REMOVABLE_ROLES.get(role_name.lower())
+
+        if not role_name:
+            return Response(
+                {"detail": ("Only Teacher and Author roles " "can be removed.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            user_role = UserRole.objects.get(
+                user=request.user,
+                role__name=role_name,
+            )
+
+        except UserRole.DoesNotExist:
+            return Response(
+                {"detail": (f"You do not have the {role_name} role.")},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        user_role.delete()
+
+        return Response(
+            {"detail": (f"{role_name} role removed successfully.")},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminRoleRequestListView(RolePermissionMixin, generics.ListAPIView):
     """
     Admin endpoint.
 
@@ -275,7 +330,7 @@ class AdminRoleRequestListView(generics.ListAPIView):
     """
 
     serializer_class = AdminRoleRequestSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = ["Admin"]
     authentication_classes = [JWTAuthentication]
 
     def get_queryset(self):
@@ -306,13 +361,13 @@ class AdminRoleRequestListView(generics.ListAPIView):
         return queryset
 
 
-class AdminRoleRequestDetailView(generics.RetrieveAPIView):
+class AdminRoleRequestDetailView(RolePermissionMixin, generics.RetrieveAPIView):
     """
     Admin endpoint for viewing a specific role request.
     """
 
     serializer_class = AdminRoleRequestSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = ["Admin"]
     authentication_classes = [JWTAuthentication]
 
     queryset = (
@@ -326,7 +381,7 @@ class AdminRoleRequestDetailView(generics.RetrieveAPIView):
     )
 
 
-class AdminRoleRequestReviewView(generics.UpdateAPIView):
+class AdminRoleRequestReviewView(RolePermissionMixin, generics.UpdateAPIView):
     """
     Admin endpoint used to approve or reject
     a pending role request.
@@ -347,7 +402,7 @@ class AdminRoleRequestReviewView(generics.UpdateAPIView):
     """
 
     serializer_class = AdminRoleRequestSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = ["Admin"]
     authentication_classes = [JWTAuthentication]
 
     queryset = (
@@ -383,5 +438,124 @@ class AdminRoleRequestReviewView(generics.UpdateAPIView):
 
         return Response(
             serializer.data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class GoogleAuthView(APIView):
+    """
+    Authenticate a user using a Google ID token.
+
+    Flow:
+    1. Receive Google's ID token.
+    2. Verify the token with Google.
+    3. Extract the Google account information.
+    4. Find an existing user by google_id.
+    5. Create a new user if necessary.
+    6. Return our application's JWT access + refresh tokens.
+    """
+
+    def post(self, request):
+        google_token = request.data.get("id_token")
+
+        if not google_token:
+            return Response(
+                {"error": "توکن گوگل ارسال نشده است."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            decoded = id_token.verify_oauth2_token(
+                google_token,
+                requests.Request(),
+                settings.GOOGLE_CLIENT_ID,
+            )
+
+        except ValueError:
+            return Response(
+                {"error": "توکن گوگل نامعتبر یا منقضی شده است."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        google_id = decoded.get("sub")
+        email = decoded.get("email")
+        email_verified = decoded.get("email_verified", False)
+
+        if not google_id or not email:
+            return Response(
+                {"error": "اطلاعات حساب گوگل ناقص است."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        given_name = decoded.get("given_name", "")
+        family_name = decoded.get("family_name", "")
+
+        full_name = f"{given_name} {family_name}".strip()
+
+        if not full_name:
+            full_name = email.split("@")[0]
+
+        if not email_verified:
+            return Response(
+                {"error": "ایمیل حساب گوگل تأیید نشده است."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = UserBase.objects.filter(google_id=google_id).first()
+        
+        if user and not user.is_active:
+            return Response(
+                {"error": "این حساب غیرفعال است."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        created = False
+
+        if user:
+            if full_name and user.FName != full_name:
+                user.FName = full_name
+                user.save(update_fields=["FName"])
+
+        # -----------------------------------------
+        # New Google account
+        # -----------------------------------------
+
+        else:
+            # Check whether the email already belongs
+            # to an existing normal account.
+            existing_user = UserBase.objects.filter(Email__iexact=email).first()
+
+            if existing_user:
+                return Response(
+                    {"error": ("این ایمیل قبلاً در سایت ثبت شده است. ")},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            base_username = email.split("@")[0]
+            username = base_username
+
+            counter = 1
+
+            while UserBase.objects.filter(UserName=username).exists():
+                username = f"{base_username}{counter}"
+                counter += 1
+
+            user = UserBase.objects.create_user(
+                UserName=username,
+                Email=email,
+                FName=full_name,
+                google_id=google_id,
+            )
+
+            created = True
+
+        refresh = RefreshToken.for_user(user)
+
+        return Response(
+            {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "is_new_user": created,
+            },
             status=status.HTTP_200_OK,
         )

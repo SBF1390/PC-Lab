@@ -1,12 +1,13 @@
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import *
+from .models import Role, RoleRequest, RoleRequestAttachment, UserBase, UserRole
 
 UserBase = get_user_model()
 
@@ -56,6 +57,10 @@ class UserBaseSerializer(serializers.ModelSerializer):
     )
 
     author_attachments = MultipleFileField(required=False, write_only=True)
+
+    def validate_password(self, value):
+        validate_password(value, self.instance)
+        return value
 
     class Meta:
 
@@ -287,54 +292,33 @@ class RoleRequestSerializer(serializers.ModelSerializer):
 
         role_name = requested_role.name
 
-        if UserRole.objects.filter(user=user, role=requested_role).exists():
+        if UserRole.objects.filter(
+            user=user,
+            role=requested_role,
+        ).exists():
 
             raise serializers.ValidationError(
-                {"requested_role": f"You already have the {role_name} role."}
+                {"requested_role": (f"You already have the {role_name} role.")}
             )
 
-        pending_exists = RoleRequest.objects.filter(
-            user=user, requested_role=requested_role, status=RoleRequest.Status.PENDING
+        seven_days_ago = timezone.now() - timedelta(days=7)
+
+        recent_request_exists = RoleRequest.objects.filter(
+            user=user,
+            requested_role=requested_role,
+            created_at__gte=seven_days_ago,
         ).exists()
 
-        if pending_exists:
+        if recent_request_exists:
 
             raise serializers.ValidationError(
                 {
-                    "requested_role": f"You already have a pending {role_name} "
-                    "role request."
+                    "requested_role": (
+                        f"You can only request the {role_name} role "
+                        "once every 7 days."
+                    )
                 }
             )
-
-        last_rejected_request = (
-            RoleRequest.objects.filter(
-                user=user,
-                requested_role=requested_role,
-                status=RoleRequest.Status.REJECTED,
-            )
-            .order_by("-reviewed_at")
-            .first()
-        )
-
-        if last_rejected_request and last_rejected_request.reviewed_at:
-
-            cooldown_end = last_rejected_request.reviewed_at + timedelta(days=7)
-
-            if timezone.now() < cooldown_end:
-
-                remaining = cooldown_end - timezone.now()
-
-                days = remaining.days
-                hours = remaining.seconds // 3600
-
-                raise serializers.ValidationError(
-                    {
-                        "requested_role": f"You must wait before requesting the "
-                        f"{role_name} role again. "
-                        f"Approximately {days} day(s) and "
-                        f"{hours} hour(s) remaining."
-                    }
-                )
 
         return attrs
 
