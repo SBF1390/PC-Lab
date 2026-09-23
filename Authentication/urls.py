@@ -14,6 +14,8 @@ from .views import (
     UserRoleRequestCancelView,
     UserRoleRequestDetailView,
     UserRoleRequestListCreateView,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
 )
 
 urlpatterns = [
@@ -81,5 +83,15 @@ urlpatterns = [
         "roles/<str:role_name>/",
         UserRoleRemoveView.as_view(),
         name="remove-role",
+    ),
+    path(
+        "password/reset/",
+        PasswordResetRequestView.as_view(),
+        name="password-reset-request",
+    ),
+    path(
+        "password/reset/<uidb64>/<token>/",
+        PasswordResetConfirmView.as_view(),
+        name="password-reset-confirm",
     ),
 ]

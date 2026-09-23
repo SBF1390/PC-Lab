@@ -3496,3 +3496,445 @@ class AuthenticationTests(TestCase):
         )
 
         mock_verify.assert_called_once()
+
+    @patch("Authentication.views.send_mail")
+    def test_password_reset_request_sends_email_for_existing_active_user(
+        self,
+        mock_send_mail,
+    ):
+        user = self.create_active_user(
+            username="reset_user",
+            email="reset@example.com",
+        )
+
+        response = self.client.post(
+            "/account/password/reset/",
+            {
+                "email": "reset@example.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        mock_send_mail.assert_called_once()
+
+        call_kwargs = mock_send_mail.call_args.kwargs
+
+        self.assertEqual(
+            call_kwargs["recipient_list"],
+            [user.Email],
+        )
+
+        self.assertIn(
+            "password/reset/",
+            call_kwargs["message"],
+        )
+
+        self.assertIn(
+            "Reset your PC-Lab password",
+            call_kwargs["subject"],
+        )
+
+    @patch("Authentication.views.send_mail")
+    def test_password_reset_request_is_case_insensitive(
+        self,
+        mock_send_mail,
+    ):
+        user = self.create_active_user(
+            username="reset_case_user",
+            email="ResetCase@example.com",
+        )
+
+        response = self.client.post(
+            "/account/password/reset/",
+            {
+                "email": "resetcase@EXAMPLE.COM",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        mock_send_mail.assert_called_once()
+
+        self.assertEqual(
+            mock_send_mail.call_args.kwargs["recipient_list"],
+            [user.Email],
+        )
+
+    @patch("Authentication.views.send_mail")
+    def test_password_reset_request_does_not_reveal_nonexistent_email(
+        self,
+        mock_send_mail,
+    ):
+        response = self.client.post(
+            "/account/password/reset/",
+            {
+                "email": "doesnotexist@example.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.assertEqual(
+            response.data["detail"],
+            (
+                "If an account with that email exists, "
+                "a password reset link has been sent."
+            ),
+        )
+
+        mock_send_mail.assert_not_called()
+
+    @patch("Authentication.views.send_mail")
+    def test_password_reset_request_does_not_send_for_inactive_user(
+        self,
+        mock_send_mail,
+    ):
+        user = self.create_active_user(
+            username="inactive_reset",
+            email="inactive_reset@example.com",
+        )
+
+        user.is_active = False
+
+        user.save(update_fields=["is_active"])
+
+        response = self.client.post(
+            "/account/password/reset/",
+            {
+                "email": user.Email,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        mock_send_mail.assert_not_called()
+
+    @patch("Authentication.views.send_mail")
+    def test_password_reset_request_does_not_send_for_google_only_user(
+        self,
+        mock_send_mail,
+    ):
+        user = self.create_active_user(
+            username="google_reset",
+            email="google_reset@example.com",
+        )
+
+        user.set_unusable_password()
+
+        user.save(update_fields=["password"])
+
+        response = self.client.post(
+            "/account/password/reset/",
+            {
+                "email": user.Email,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        mock_send_mail.assert_not_called()
+
+    def test_password_reset_confirm_changes_password(self):
+        user = self.create_active_user(
+            username="confirm_reset",
+            email="confirm_reset@example.com",
+        )
+
+        old_password = "OldPassword123"
+        new_password = "12345678"
+
+        user.set_password(old_password)
+
+        user.save(update_fields=["password"])
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": new_password,
+                "confirm_password": new_password,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        user.refresh_from_db()
+
+        self.assertTrue(user.check_password(new_password))
+
+        self.assertFalse(user.check_password(old_password))
+
+    def test_password_reset_confirm_rejects_invalid_token(self):
+        user = self.create_active_user(
+            username="invalid_reset",
+            email="invalid_reset@example.com",
+        )
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/invalid-token/",
+            {
+                "new_password": "12345678",
+                "confirm_password": "12345678",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_password_reset_confirm_rejects_invalid_uid(self):
+        response = self.client.post(
+            "/account/password/reset/" "invalid-uid/" "invalid-token/",
+            {
+                "new_password": "12345678",
+                "confirm_password": "12345678",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_password_reset_confirm_rejects_password_mismatch(self):
+        user = self.create_active_user(
+            username="mismatch_reset",
+            email="mismatch_reset@example.com",
+        )
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": "12345678",
+                "confirm_password": "87654321",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assertIn(
+            "confirm_password",
+            response.data,
+        )
+
+    def test_password_reset_confirm_rejects_short_password(self):
+        user = self.create_active_user(
+            username="short_reset",
+            email="short_reset@example.com",
+        )
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": "1234567",
+                "confirm_password": "1234567",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assertIn(
+            "new_password",
+            response.data,
+        )
+
+    def test_password_reset_confirm_requires_new_password(self):
+        user = self.create_active_user(
+            username="missing_new_reset",
+            email="missing_new_reset@example.com",
+        )
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "confirm_password": "12345678",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assertIn(
+            "new_password",
+            response.data,
+        )
+
+    def test_password_reset_confirm_requires_confirmation_password(self):
+        user = self.create_active_user(
+            username="missing_confirm_reset",
+            email="missing_confirm_reset@example.com",
+        )
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": "12345678",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assertIn(
+            "confirm_password",
+            response.data,
+        )
+
+    def test_password_reset_confirm_invalidates_token_after_success(
+        self,
+    ):
+        user = self.create_active_user(
+            username="single_use_reset",
+            email="single_use_reset@example.com",
+        )
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        first_response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": "12345678",
+                "confirm_password": "12345678",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            first_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        second_response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": "87654321",
+                "confirm_password": "87654321",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            second_response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_password_reset_confirm_rejects_inactive_user(self):
+        user = self.create_active_user(
+            username="inactive_confirm_reset",
+            email="inactive_confirm_reset@example.com",
+        )
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        user.is_active = False
+
+        user.save(update_fields=["is_active"])
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": "12345678",
+                "confirm_password": "12345678",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_password_reset_confirm_rejects_google_only_user(self):
+        user = self.create_active_user(
+            username="google_confirm_reset",
+            email="google_confirm_reset@example.com",
+        )
+
+        user.set_unusable_password()
+
+        user.save(update_fields=["password"])
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+        token = default_token_generator.make_token(user)
+
+        response = self.client.post(
+            f"/account/password/reset/{uid}/{token}/",
+            {
+                "new_password": "12345678",
+                "confirm_password": "12345678",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )

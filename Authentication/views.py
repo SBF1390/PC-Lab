@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ValidationError
 from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
@@ -19,8 +21,12 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .models import RoleRequest, UserBase, UserRole
 from .permissions import RolePermissionMixin
-from .serializers import (AdminRoleRequestSerializer, RoleRequestSerializer,
-                          UserBaseSerializer, UserTokenObtainSerializer)
+from .serializers import (
+    AdminRoleRequestSerializer,
+    RoleRequestSerializer,
+    UserBaseSerializer,
+    UserTokenObtainSerializer,
+)
 
 UserBase = get_user_model()
 
@@ -502,7 +508,7 @@ class GoogleAuthView(APIView):
             )
 
         user = UserBase.objects.filter(google_id=google_id).first()
-        
+
         if user and not user.is_active:
             return Response(
                 {"error": "این حساب غیرفعال است."},
@@ -557,5 +563,164 @@ class GoogleAuthView(APIView):
                 "refresh": str(refresh),
                 "is_new_user": created,
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class PasswordResetRequestView(APIView):
+    """
+    Request a password reset email.
+
+    The endpoint always returns the same response so that
+    it does not reveal whether an email belongs to an account.
+    """
+
+    permission_classes = []
+    authentication_classes = []
+
+    def post(self, request):
+        email = request.data.get("email")
+
+        if email:
+            user = UserBase.objects.filter(
+                Email__iexact=email,
+                is_active=True,
+            ).first()
+
+            if user and user.has_usable_password():
+
+                token = default_token_generator.make_token(user)
+
+                uid = urlsafe_base64_encode(force_bytes(user.pk))
+
+                reset_link = (
+                    f"{settings.BASE_URL}" f"/account/password/reset/{uid}/{token}/"
+                )
+
+                send_mail(
+                    subject="Reset your PC-Lab password",
+                    message=(
+                        f"Hello {user.FName},\n\n"
+                        f"A password reset was requested for your "
+                        f"PC-Lab account.\n\n"
+                        f"To reset your password, open the link below:\n\n"
+                        f"{reset_link}\n\n"
+                        f"If you did not request a password reset, "
+                        f"you can ignore this email."
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.Email],
+                    fail_silently=False,
+                )
+
+        return Response(
+            {
+                "detail": (
+                    "If an account with that email exists, "
+                    "a password reset link has been sent."
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class PasswordResetConfirmView(APIView):
+    """
+    Set a new password using a valid password reset token.
+
+    Expected data:
+
+        {
+            "new_password": "...",
+            "confirm_password": "..."
+        }
+    """
+
+    permission_classes = []
+    authentication_classes = []
+
+    def post(self, request, uidb64, token):
+
+        try:
+            uid = force_str(urlsafe_base64_decode(uidb64))
+
+            user = UserBase.objects.get(pk=uid)
+
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+            UnicodeDecodeError,
+            UserBase.DoesNotExist,
+        ):
+            return Response(
+                {"detail": "Invalid password reset link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.is_active:
+            return Response(
+                {"detail": "Invalid password reset link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.has_usable_password():
+            return Response(
+                {"detail": "Invalid password reset link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not default_token_generator.check_token(
+            user,
+            token,
+        ):
+            return Response(
+                {"detail": "Invalid or expired password reset link."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        new_password = request.data.get("new_password")
+        confirm_password = request.data.get("confirm_password")
+
+        if not new_password:
+            return Response(
+                {"new_password": "This field is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not confirm_password:
+            return Response(
+                {"confirm_password": "This field is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if new_password != confirm_password:
+            return Response(
+                {"confirm_password": "Passwords do not match."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(
+                new_password,
+                user,
+            )
+
+        except ValidationError as error:
+            return Response(
+                {"new_password": error.messages},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(new_password)
+
+        user.save(
+            update_fields=[
+                "password",
+            ]
+        )
+
+        return Response(
+            {"detail": "Password reset successfully."},
             status=status.HTTP_200_OK,
         )
