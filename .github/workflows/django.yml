@@ -1,0 +1,37 @@
+name: Django CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      SECRET_KEY: "ci-test-secret-key"
+      BASE_URL: "http://testserver"
+      EMAIL_HOST_USER: "ci@example.com"
+      EMAIL_HOST_PASSWORD: "ci-test-password"
+      GOOGLE_CLIENT_ID: "ci-test-client-id"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          python manage.py test -v2
